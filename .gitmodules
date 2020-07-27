@@ -1,0 +1,3 @@
+[submodule "data/STL_DEMOGRAPHY_TractPop"]
+	path = data/STL_DEMOGRAPHY_TractPop
+	url = https://github.com/PrenerLab/STL_DEMOGRAPHY_TractPop
