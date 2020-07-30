@@ -1,0 +1,326 @@
+---
+title: "02 - Historic Segregation in St. Louis"
+author: "Your Name"
+date: '(`r format(Sys.time(), "%B %d, %Y")`)'
+output: github_document
+---
+
+## Introduction
+This notebook maps calculates segregation measures for each time period within the study.
+
+## Dependencies
+This notebook requires the following packages:
+
+```{r load-packages}
+# tidyverse packages
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+
+# spatial packages
+library(sf)
+
+# other packages
+library(DBI)
+```
+
+## Load Data
+All of the historical data are stored in a SQLite database stored in this repository as a submodule. In addition, we'll need our census tract boundary data.
+
+```{r load-data}
+## establish SQLite connection
+con <- dbConnect(RSQLite::SQLite(), here::here("data", "STL_DEMOGRAPHY_TractPop", "data", "STL_CITY_COUNTY_Database.sqlite"))
+
+## tracts
+tracts <- st_read(here::here("data", "STL_BOUNDARY_Tracts_2010", "STL_BOUNDARY_Tracts_2010.geojson")) %>%
+  st_transform(crs = 26915) %>%
+  rename(geoid = GEOID)
+```
+
+## Calculate Segregation
+### 1940
+In order to calculate the segregation measure ICE, we need to extract data on race out of the SQL database:
+
+```{r collect-records-40}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "1940") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "1940") %>%
+  collect() -> race
+```
+
+The data are in "long" form, so we need to convert them to "wide" data before proceeding:
+
+```{r pivot-40}
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+```
+
+Finally, we'll calculate ICE and then join it with our tract master object:
+
+```{r ice-40}
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_1940 = (white-black)/value) %>%
+  select(geoid, ice_1940) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 1950
+We'll repeat the process for 1950:
+
+```{r segregation-50}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "1950") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "1950") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_1950 = (white-black)/value) %>%
+  select(geoid, ice_1950) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 1960
+We'll repeat the process for 1960:
+
+```{r segregation-60}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "1960") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "1960") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_1960 = (white-black)/value) %>%
+  select(geoid, ice_1960) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 1970
+We'll repeat the process for 1970:
+
+```{r segregation-70}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "1970") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "1970") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_1970 = (white-black)/value) %>%
+  select(geoid, ice_1970) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 1980
+We'll repeat the process for 1980:
+
+```{r segregation-80}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "1980") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "1980") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_1980 = (white-black)/value) %>%
+  select(geoid, ice_1980) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 1990
+We'll repeat the process for 1990:
+
+```{r segregation-90}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "1990") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "1990") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_1990 = (white-black)/value) %>%
+  select(geoid, ice_1990) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 2000
+We'll repeat the process for 2000:
+
+```{r segregation-00}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "2000") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "2000") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_2000 = (white-black)/value) %>%
+  select(geoid, ice_2000) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 2010
+We'll repeat the process for 2010:
+
+```{r segregation-10}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "2010") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "2010") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_2010 = (white-black)/value) %>%
+  select(geoid, ice_2010) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+### 2018
+We'll repeat the process for 2018:
+
+```{r segregation-18}
+## collect value
+tbl(con, "population") %>%
+  filter(year == "2018") %>%
+  collect() -> pop
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "2018") %>%
+  collect() -> race
+
+## pivot
+race <- pivot_wider(race, names_from = "category", values_from = "value") %>%
+  select(-year)
+
+## calculate ice
+left_join(pop, race, by = "geoid") %>%
+  mutate(ice_2018 = (white-black)/value) %>%
+  select(geoid, ice_2018) %>%
+  left_join(tracts, ., by = "geoid") -> tracts
+```
+
+## Store Results
+Next, we'll store our spatial data:
+
+```{r store}
+tracts %>%
+  st_transform(crs = 4326) %>%
+  st_write(here::here("results", "STL_DEMOGRAPHY_ICE", "STL_DEMOGRAPHY_ICE.geojson"), delete_dsn = TRUE)
+```
+ 
+## Create Map
+
+```{r}
+counties <- st_read(here::here("data", "STL_BOUNDARY_Counties", "STL_BOUNDARY_Counties.geojson")) %>%
+  st_transform(crs = 26915)
+
+symbolic_roads <- st_read(here::here("data", "STL_TRANS_Symbolic_Roads", "STL_TRANS_Symbolic_Roads.geojson")) %>%
+  st_transform(crs = 26915) %>%
+  filter(FULLNAME == "Delmar Blvd")
+
+tracts %>%
+  select(geoid, ice_1940, ice_1950, ice_1970, ice_1990, ice_2010, ice_2018) %>%
+  gather("period", "ice", ice_1940:ice_2018) %>%
+  select(geoid, period, ice) %>%
+  mutate(period = case_when(
+   period == "ice_1940" ~ "1940", 
+   period == "ice_1950" ~ "1950",
+   period == "ice_1970" ~ "1970",
+   period == "ice_1990" ~ "1990",
+   period == "ice_2010" ~ "2010",
+   period == "ice_2018" ~ "2018"
+  )) %>%
+  mutate(ice = ifelse(ice > 1, 1, ice)) -> tracts_long
+
+categories <- cut(tracts_long$ice, breaks = seq(-1, 1, length.out = 7), include.lowest = TRUE, dig.lab = 2)
+
+tracts_long <- mutate(tracts_long, cat = categories)
+
+tracts_long$cat %>%
+  forcats::fct_relabel(~ gsub(",", " to ", .x)) %>%
+  forcats::fct_relabel(~ gsub("\\(", "", .x)) %>%
+  forcats::fct_relabel(~ gsub("\\[", "", .x)) %>%
+  forcats::fct_relabel(~ gsub("\\]", "", .x)) -> tracts_long$cat
+
+p <- ggplot(data = tracts_long, mapping = aes(fill = cat)) +
+  geom_sf(size = .2) +
+  geom_sf(data = counties, fill = NA, size = .6, color = "black") +
+  geom_sf(data = symbolic_roads, fill = NA, size = 1, color = "white") +
+  scale_fill_brewer(palette = "RdBu", name = "ICE") +
+  cowplot::theme_map() +
+  facet_wrap(~period, ncol = 2)
+
+ggsave(here::here("results", "figures", "ice_multiples.png"), p, width = 7.5, height = 10.5, units = "in", dpi = 500)
+```
+
+
