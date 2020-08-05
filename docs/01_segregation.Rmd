@@ -22,7 +22,13 @@ library(sf)
 
 # other packages
 library(DBI)
+library(ggrepel)
 ```
+
+```{r}
+source(here::here("source", "functions", "get_coords.R"))
+```
+
 
 ## Load Data
 All of the historical data are stored in a SQLite database stored in this repository as a submodule. In addition, we'll need our census tract boundary data.
@@ -288,6 +294,12 @@ symbolic_roads <- st_read(here::here("data", "STL_TRANS_Symbolic_Roads", "STL_TR
   st_transform(crs = 26915) %>%
   filter(FULLNAME == "Delmar Blvd")
 
+symbolic_roads_centroids <- symbolic_roads %>%
+  st_centroid() %>%
+  get_coords(crs = 26915)
+
+symbolic_roads_centroids <- slice(symbolic_roads_centroids, 1)
+
 tracts %>%
   select(geoid, ice_1940, ice_1950, ice_1970, ice_1990, ice_2010, ice_2018) %>%
   gather("period", "ice", ice_1940:ice_2018) %>%
@@ -311,16 +323,19 @@ tracts_long$cat %>%
   forcats::fct_relabel(~ gsub("\\(", "", .x)) %>%
   forcats::fct_relabel(~ gsub("\\[", "", .x)) %>%
   forcats::fct_relabel(~ gsub("\\]", "", .x)) -> tracts_long$cat
+```
 
+```{r}
 p <- ggplot(data = tracts_long, mapping = aes(fill = cat)) +
   geom_sf(size = .2) +
   geom_sf(data = counties, fill = NA, size = .6, color = "black") +
   geom_sf(data = symbolic_roads, fill = NA, size = 1, color = "white") +
+  geom_text_repel(data = symbolic_roads_centroids, mapping = aes(x = x, y = y, label = FULLNAME, fill = NA),
+                  nudge_x = -30000, nudge_y = 20000) +
   scale_fill_brewer(palette = "RdBu", name = "ICE") +
   cowplot::theme_map() +
   facet_wrap(~period, ncol = 2)
 
 ggsave(here::here("results", "figures", "ice_multiples.png"), p, width = 7.5, height = 10.5, units = "in", dpi = 500)
 ```
-
 

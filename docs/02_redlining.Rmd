@@ -1,0 +1,740 @@
+---
+title: "01 - Redlining in St. Louis"
+author: "Your Name"
+date: '(`r format(Sys.time(), "%B %d, %Y")`)'
+output: github_document
+---
+
+## Introduction
+This notebook maps redlining boundaries to contemporary census tracts in St. Louis City and County.
+
+## Dependencies
+This notebook requires the following packages:
+
+```{r load-packages}
+# tidyverse packages
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(readr)
+library(stringr)
+library(tibble)
+library(tidyr)
+
+# spatial packages
+library(sf)
+library(spdep)
+library(tidycensus)
+
+# other packages
+library(classInt)
+library(DBI)
+library(ggrepel)
+library(measurements)
+library(stargazer)
+```
+
+We'll also use a number of functions written to summarise statistical output:
+
+```{r load-functions}
+source(here::here("source", "functions", "corr_table.R"))
+source(here::here("source", "functions", "get_coords.R"))
+source(here::here("source", "functions", "levene_test.R"))
+source(here::here("source", "functions", "welch_test.R"))
+```
+
+## Load Data
+This notebook requires redlining boundary data as well as the 2010 U.S. Census tract boundaries:
+
+```{r load-data}
+## tracts
+tracts <- st_read(here::here("data", "STL_BOUNDARY_Tracts_2010", "STL_BOUNDARY_Tracts_2010.geojson")) %>%
+  st_transform(crs = 26915)
+
+## redlining
+redlining_37 <- st_read(here::here("data", "STL_BOUNDARY_Redlining", "STL_BOUNDARY_Redlining_1937.geojson")) %>%
+  st_transform(crs = 26915)
+
+redlining_40 <- st_read(here::here("data", "STL_BOUNDARY_Redlining", "STL_BOUNDARY_Redlining_1940.geojson")) %>%
+  st_transform(crs = 26915)
+
+## current demographics
+demographics <- read_csv(here::here("data", "STL_DEMOGRAPHY_Current", "STL_DEMOGRAPHY_Current.csv"),
+                         col_types = cols(GEOID = col_character()))
+
+## read segregation data
+segregation <- st_read(here::here("results", "STL_DEMOGRAPHY_ICE", "STL_DEMOGRAPHY_ICE.geojson"))
+st_geometry(segregation) <- NULL
+
+counties <- st_read(here::here("data", "STL_BOUNDARY_Counties", "STL_BOUNDARY_Counties.geojson")) %>%
+  st_transform(crs = 26915)
+
+symbolic_roads <- st_read(here::here("data", "STL_TRANS_Symbolic_Roads", "STL_TRANS_Symbolic_Roads.geojson")) %>%
+  st_transform(crs = 26915) %>%
+  filter(FULLNAME == "Delmar Blvd")
+
+symbolic_roads_centroids <- symbolic_roads %>%
+  st_centroid() %>%
+  get_coords(crs = 26915)
+
+## establish SQLite connection
+con <- dbConnect(RSQLite::SQLite(), here::here("data", "STL_DEMOGRAPHY_TractPop", "data", "STL_CITY_COUNTY_Database.sqlite"))
+```
+
+## Initial Data Wrangling
+We want to first combine the current segregation value with our demographic data:
+
+```{r combine-demos-current-seg}
+segregation %>%
+  select(geoid, ice_2018) %>%
+  rename(
+    GEOID = geoid,
+    ice_race = ice_2018
+  ) %>%
+  left_join(., demographics, by = "GEOID") -> demographics
+```
+
+We also want to get the current percentrage of African American residents per tract, and calculate population change since 1950. 
+
+```{r query-sql}
+## collect 1950 population
+tbl(con, "population") %>%
+  filter(year == "1950") %>%
+  select(geoid, value) %>%
+  rename(pop50 = value) %>%
+  collect() -> pop_50
+
+## collect 2018 population
+tbl(con, "population") %>%
+  filter(year == "2018") %>%
+  select(geoid, value) %>%
+  rename(pop18 = value) %>%
+  collect() -> pop_18
+
+## collect race
+tbl(con, "race") %>%
+  filter(year == "2018") %>%
+  filter(category == "black") %>%
+  select(geoid, value) %>%
+  rename(black = value) %>%
+  collect() -> race
+```
+
+Then, we'll take care of percent of Black residents:
+
+```{r percent-black}
+left_join(pop_18, race, by = "geoid") %>%
+  mutate(black_pct = black/pop18*100) %>%
+  select(geoid, black_pct) %>%
+  left_join(demographics, ., by = c("GEOID" = "geoid")) %>%
+  select(GEOID, black_pct, everything()) -> demographics
+```
+Next, we'll calculate the percent change in population since 1950:
+
+```{r pct-change}
+left_join(pop_50, pop_18, by = "geoid") %>%
+  mutate(pop_delta = (pop18-pop50)/pop50*100) %>%
+  select(geoid, pop_delta) %>%
+  left_join(demographics, ., by = c("GEOID" = "geoid")) %>%
+  select(GEOID, black_pct, ice_race, pop_delta, everything()) -> demographics
+```
+
+Finally, we'll get rid of objects we no longer need:
+
+```{r clean-up-initial}
+dbDisconnect(con)
+
+rm(con, pop_18, pop_50, race)
+```
+
+
+## Geoprocess Tracts
+In order to determine the percent of each tract redlined, we need to know the total area of each tract. We'll calculate the area in square meters (based on the projected coordinate system in use), then convert it to square kilometers.
+
+```{r tract-area}
+tracts %>%
+  mutate(total_area = st_area(geometry)) %>%
+  mutate(total_area = as.vector(conv_unit(total_area, from = "m2", to = "km2"))) %>%
+  select(GEOID, total_area) -> tracts
+```
+
+The square kilometers conversion isn't strictly speaking necessary for this application, but is included in-case it is needed later.
+
+## Geoprocess 1937 Data
+Next, we'll calculate the percent of tracts redlined in 1937. First, we need to figure out which tract each redlined area for the "C" and "D" grades falls into, and then combine adjacent areas within the same tract. Next, we'll repeat the workflow above for calculating the sqare kilometers redlined.
+
+```{r 1937-step-1}
+redlining_37 %>%  
+  filter(grade %in% c("C", "D")) %>%
+  st_intersection(., tracts) %>%
+  group_by(GEOID) %>%
+  summarise() %>%
+  st_collection_extract(type = "POLYGON") %>%
+  mutate(red_area = st_area(geometry)) %>%
+  mutate(red_area = as.vector(conv_unit(red_area, from = "m2", to = "km2"))) %>%
+  select(GEOID, red_area) -> redlining_37
+```
+
+With these calculations complete, we'll remove the geometry from the redlining data:
+
+```{r 1937-step-2}
+st_geometry(redlining_37) <- NULL
+```
+
+Finally, we'll merge our tract data with the 1937 redlining data, and convert the measurement data into a percentage:
+
+```{r 1937-step-3}
+tracts %>%
+  left_join(., redlining_37, by = "GEOID") %>%
+  mutate(pct_red_37 = red_area/total_area*100) %>%
+  select(GEOID, pct_red_37) %>%
+  mutate(pct_red_37 = ifelse(is.na(pct_red_37) == TRUE, 0, pct_red_37)) -> redlining_37
+```
+
+## Geoprocess 1940 Data
+We'll use an identical workflow for the 1940 data:
+
+```{r 1940-data}
+## step 1
+redlining_40 %>%  
+  filter(grade %in% c("C", "D")) %>%
+  st_intersection(., tracts) %>%
+  group_by(GEOID) %>%
+  summarise() %>%
+  st_collection_extract(type = "POLYGON") %>%
+  mutate(red_area = st_area(geometry)) %>%
+  mutate(red_area = as.vector(conv_unit(red_area, from = "m2", to = "km2"))) %>%
+  select(GEOID, red_area) -> redlining_40
+
+## step 2
+st_geometry(redlining_40) <- NULL
+
+## step 3
+tracts %>%
+  left_join(., redlining_40, by = "GEOID") %>%
+  mutate(pct_red_40 = red_area/total_area*100) %>%
+  select(GEOID, pct_red_40) %>%
+  mutate(pct_red_40 = ifelse(is.na(pct_red_40) == TRUE, 0, pct_red_40)) -> redlining_40
+```
+
+## Store Geoprocessed Data
+Next, we'll store these as separate `.geojson` files:
+
+```{r store-separately}
+## 1937
+redlining_37 %>%
+  st_transform(crs = 4326) %>%
+  st_write(here::here("data", "STL_BOUNDARY_Redlining", "STL_BOUNDARY_Tracts_1937.geojson"), delete_dsn = TRUE)
+
+## 1940
+redlining_40 %>%
+  st_transform(crs = 4326) %>%
+  st_write(here::here("data", "STL_BOUNDARY_Redlining", "STL_BOUNDARY_Tracts_1940.geojson"), delete_dsn = TRUE)
+```
+## Map 1940 Redlining Values
+
+```{r}
+## create breaks
+breaks <- classInt::classIntervals(redlining_40$pct_red_40, n = 5, style = "fisher")
+
+categories <- cut(redlining_40$pct_red_40, breaks = c(breaks$brks), include.lowest = TRUE, dig.lab = 2)
+
+redlining_40_map <- mutate(redlining_40, map_breaks = categories)
+
+redlining_40_map$map_breaks %>%
+  forcats::fct_relabel(~ gsub(",", " to ", .x)) %>%
+  forcats::fct_relabel(~ gsub("\\(", "", .x)) %>%
+  forcats::fct_relabel(~ gsub("\\[", "", .x)) %>%
+  forcats::fct_relabel(~ gsub("\\]", "", .x)) -> redlining_40_map$map_breaks
+
+redlining_40_map$map_breaks <- forcats::fct_recode(redlining_40_map$map_breaks, "81 to 100" = "81 to 1e+02")
+
+symbolic_roads_centroids <- slice(symbolic_roads_centroids, 1)
+
+## create map
+p <- ggplot(data = redlining_40_map, mapping = aes(fill = map_breaks)) +
+  geom_sf(size = .2) +
+  geom_sf(data = counties, fill = NA, size = .6, color = "black") +
+  geom_sf(data = symbolic_roads, fill = NA, size = 1, color = "black") +
+  geom_text_repel(data = symbolic_roads_centroids, mapping = aes(x = x, y = y, label = FULLNAME, fill = NA),
+                  nudge_x = -30000, nudge_y = 20000) +
+  scale_fill_brewer(palette = "Reds", name = "% Redlined") +
+  cowplot::theme_map()
+
+ggsave(here::here("results", "figures", "redlining_40.png"), p, width = 7.5, height = 6, units = "in", dpi = 500)
+```
+
+
+
+## Combine Into A Single File
+Finally, for analysis, we'll combine these two percentages into a single object:
+
+```{r store-combined}
+## remove geometry
+redlining_40_sf <- redlining_40
+st_geometry(redlining_40) <- NULL
+
+## combine and calculate percent change
+left_join(redlining_37, redlining_40, by = "GEOID") %>%
+  mutate(pct_change = (pct_red_40-pct_red_37)/pct_red_37*100) %>%
+  st_transform(crs = 4326) %>%
+  st_write(here::here("data", "STL_BOUNDARY_Redlining", "STL_BOUNDARY_Tracts_Combined.geojson"), delete_dsn = TRUE)
+```
+
+We'll then remove some of the objects we no longer need:
+
+```{r clean-up}
+redlining_40 <- redlining_40_sf
+rm(redlining_37, redlining_40_sf, tracts)
+```
+
+## Redlining and Historic Segregation
+To measure the relationship between redlining and segregation, we'll first combine our geoprocessed redlining data with our segregation data:
+
+```{r create-red-seg-data}
+# join
+red_segregation <- left_join(redlining_40, segregation, by = c("GEOID" = "geoid"))
+
+# add county ID
+red_segregation %>%
+mutate(county = str_sub(GEOID, 1, 5)) %>%
+  select(GEOID, county, everything()) -> red_segregation
+
+# create non-sf version
+st_geometry(red_segregation) <- NULL
+```
+
+Next, we'll calculate correlation coefficients for all tracts, just city tracts, and just county tracts:
+
+```{r red-seg-corrs}
+red_segregation %>%
+  select(-GEOID, -county) %>%
+  corr_table(coef = "pearson") %>%
+  select(pct_red_40) %>%
+  rownames_to_column(var = "var") %>%
+  filter(var %in% c("pct_red_40") == FALSE) %>%
+  rename(all = pct_red_40) -> red_corr_all
+
+red_segregation %>%
+  filter(county == "29510") %>%
+  select(-GEOID, -county) %>%
+  corr_table(coef = "pearson") %>%
+  select(pct_red_40) %>%
+  rownames_to_column(var = "var") %>%
+  filter(var %in% c("pct_red_40") == FALSE) %>%
+  rename(city = pct_red_40) -> red_corr_city
+
+red_segregation %>%
+  filter(county == "29189") %>%
+  select(-GEOID, -county) %>%
+  corr_table(coef = "pearson") %>%
+  select(pct_red_40) %>%
+  rownames_to_column(var = "var") %>%
+  filter(var %in% c("pct_red_40") == FALSE) %>%
+  rename(county = pct_red_40) -> red_corr_county
+```
+
+Finally, we'll combine them into a single table:
+
+```{r red-seg-output}
+# combine tables
+left_join(red_corr_all, red_corr_city, by = "var") %>%
+  left_join(., red_corr_county, by = "var") %>%
+  mutate(var = str_sub(var, -4, -1)) %>%
+  rename(year = var) -> red_corr
+
+# clean-up
+rm(red_corr_all, red_corr_city, red_corr_county, red_segregation)
+
+# print correlations
+red_corr
+```
+
+With our table created, we can write it results:
+
+```{r}
+write_csv(red_corr, here::here("results", "tables", "redlining_correlations.csv"))
+```
+
+## Create Descriptive Statistics
+In order to see our current demogrpahic data broken down by redlining, we need to first convert our redlining percentages to quartiles:
+
+```{r make-quartiles}
+# create breaks
+breaks <- classIntervals(redlining_40$pct_red_40, n = 5, style = "fisher")
+# breaks$brks <- c(0, 20, 40, 60, 80, 101)
+
+# create cateogries
+categories <- cut(redlining_40$pct_red_40, breaks = c(breaks$brks), include.lowest = TRUE, dig.lab = 2)
+
+# assign categories to variable
+redlining_40 <- mutate(redlining_40, red_cat = categories)
+
+# with our values assigned, we can clean-up a bit
+rm(breaks, categories)
+```
+
+We'll also add a county identifier, and then join these data with our demographic measures:
+
+```{r join-demos-redlining}
+demographics %>%
+  mutate(GEOID = as.character(GEOID)) %>%
+  left_join(redlining_40, ., by = "GEOID") %>%
+  mutate(county = str_sub(GEOID, 1, 5)) %>%
+  select(GEOID, county, everything()) -> demographics
+
+demographics_sf <- demographics
+st_geometry(demographics) <- NULL
+
+rm(redlining_40)
+```
+
+Next, we'll group by these categories and calculate demographic values
+
+```{r describe-by-redlining}
+demographics %>%
+  group_by(red_cat) %>%
+  summarise(
+    tracts = n(),
+    black_pct = median(black_pct, na.rm = TRUE),
+    ice_race = median(ice_race, na.rm = TRUE),
+    pop_delta = median(pop_delta, na.rm = TRUE),
+    ice_income = median(ice_income, na.rm = TRUE),
+    median_inc = median(median_inc, na.rm = TRUE),
+    poverty_pct = median(poverty_pct, na.rm = TRUE),
+    labor_pct = median(labor_pct, na.rm = TRUE),
+    owner_occ_pct = median(owner_occ_pct, na.rm = TRUE),
+    owner_occ_value = median(owner_occ_value, na.rm = TRUE),
+    vacant_pct = median(vacant_pct, na.rm = TRUE)
+  ) -> red_demos_all
+```
+
+We'll repeat this, but just for city tracts:
+
+```{r describe-by-redlining}
+demographics %>%
+  filter(county == "29510") %>%
+  group_by(red_cat) %>%
+  summarise(
+    tracts = n(),
+    black_pct = median(black_pct, na.rm = TRUE),
+    ice_race = median(ice_race, na.rm = TRUE),
+    pop_delta = median(pop_delta, na.rm = TRUE),
+    ice_income = median(ice_income, na.rm = TRUE),
+    median_inc = median(median_inc, na.rm = TRUE),
+    poverty_pct = median(poverty_pct, na.rm = TRUE),
+    labor_pct = median(labor_pct, na.rm = TRUE),
+    owner_occ_pct = median(owner_occ_pct, na.rm = TRUE),
+    owner_occ_value = median(owner_occ_value, na.rm = TRUE),
+    vacant_pct = median(vacant_pct, na.rm = TRUE)
+  ) -> red_demos_city
+```
+
+We'll repeat this again, this time just for county tracts:
+
+```{r describe-by-redlining}
+demographics %>%
+  filter(county == "29189") %>%
+  group_by(red_cat) %>%
+  summarise(
+    tracts = n(),
+    black_pct = median(black_pct, na.rm = TRUE),
+    ice_race = median(ice_race, na.rm = TRUE),
+    pop_delta = median(pop_delta, na.rm = TRUE),
+    ice_income = median(ice_income, na.rm = TRUE),
+    median_inc = median(median_inc, na.rm = TRUE),
+    poverty_pct = median(poverty_pct, na.rm = TRUE),
+    labor_pct = median(labor_pct, na.rm = TRUE),
+    owner_occ_pct = median(owner_occ_pct, na.rm = TRUE),
+    owner_occ_value = median(owner_occ_value, na.rm = TRUE),
+    vacant_pct = median(vacant_pct, na.rm = TRUE)
+  ) -> red_demos_county
+```
+
+## Test Homogeneity of Variance Assumption
+First, we'll define a vector of variable names we want to test:
+
+```{r define-vars}
+vars <- c("black_pct", "ice_race", "pop_delta", "ice_income", "median_inc", "poverty_pct", "labor_pct", 
+          "owner_occ_pct", "owner_occ_value", "vacant_pct")
+```
+
+Now we can summarize the output for the full data set:
+
+```{r}
+# perform levenes test
+vars %>%
+  unlist() %>%
+  map_df(~levene_test(demographics, var = .x))
+```
+
+We can repeat this for the city data:
+
+```{r}
+# subset
+demos_sub <- filter(demographics, county == "29510")
+
+# perform levenes test
+vars %>%
+  unlist() %>%
+  map_df(~levene_test(demos_sub, var = .x))
+```
+
+And we can repeat this for the county data:
+
+```{r}
+# subset
+demos_sub <- filter(demographics, county == "29189")
+
+# perform levenes test
+vars %>%
+  unlist() %>%
+  map_df(~levene_test(demos_sub, var = .x))
+```
+
+We have a mix of results, with some violating the assumption and others not. To standardize our reporting, we'll use the Welch's one-way test as opposed to the one way ANOVA.
+
+## Hypothesis Testing
+We can summarize the output for the full data set:
+
+```{r}
+# perform levenes test
+vars %>%
+  unlist() %>%
+  map_df(~welch_test(demographics, var = .x)) -> red_diff_all
+
+red_diff_all
+```
+
+We can repeat this for the city data:
+
+```{r}
+# subset
+demos_sub <- filter(demographics, county == "29510")
+
+# perform levenes test
+vars %>%
+  unlist() %>%
+  map_df(~welch_test(demos_sub, var = .x)) -> red_diff_city
+
+red_diff_city
+```
+
+And we can repeat this for the county data:
+
+```{r}
+# subset
+demos_sub <- filter(demographics, county == "29189")
+
+# perform levenes test
+vars %>%
+  unlist() %>%
+  map_df(~welch_test(demos_sub, var = .x)) -> red_diff_county
+
+rm(demos_sub)
+
+red_diff_county
+```
+
+## Create Tables
+
+```{r}
+welch <- wide_welch(red_diff_all) 
+
+f <- function(x){
+  round(x, digits = 3)
+}
+
+red_demos_all %>%
+  mutate_if(is.numeric, f) %>%
+  mutate_all(as.character) %>%
+  bind_rows(., welch) -> red_demos_all
+
+write_csv(red_demos_all, "redlining_demos_all.csv")
+
+rm(red_diff_all)
+```
+
+```{r}
+red_demos_1 <- select(red_demos_all, red_cat, tracts, black_pct:median_inc)
+red_demos_2 <- select(red_demos_all, red_cat, tracts, poverty_pct:vacant_pct)
+
+write_csv(red_demos_1, here::here("results", "tables", "redlining_demos_all_1.csv"))
+write_csv(red_demos_2, here::here("results", "tables", "redlining_demos_all_2.csv"))
+```
+
+
+```{r}
+welch <- wide_welch(red_diff_city) 
+
+red_demos_city %>%
+  mutate_if(is.numeric, f) %>%
+  mutate_all(as.character) %>%
+  bind_rows(., welch) -> red_demos_city
+
+write_csv(red_demos_city, "redlining_demos_city.csv")
+
+rm(red_diff_city)
+```
+
+```{r}
+welch <- wide_welch(red_diff_county) 
+
+red_demos_county %>%
+  mutate_if(is.numeric, f) %>%
+  mutate_all(as.character) %>%
+  bind_rows(., welch) -> red_demos_county
+
+write_csv(red_demos_county, "redlining_demos_county.csv")
+
+rm(red_diff_county, welch, vars, f, levene_test, welch_test, wide_welch)
+```
+
+
+## Descriptive Statistics
+
+```{r}
+left_join(demographics, segregation, by = c("GEOID" = "geoid")) %>%
+  select(-ice_race) %>%
+  select(pct_red_40, black_pct, ice_1940:ice_2018, pop_delta, everything()) %>%
+  stargazer(type = "html", 
+            title = "Descriptive Statistics",
+            summary.stat = c("n", "mean", "sd", "min", "max"),
+            out = here::here("results", "tables", "descriptives.html"))
+```
+
+
+
+## Regressional Analysis 1
+
+```{r}
+demographics %>%
+  select(-county, -red_cat, -GEOID) %>%
+  corr_table(coef = "pearson")
+```
+
+
+```{r}
+demographics_sf <- na.omit(demographics_sf)
+demographics_sp <- as_Spatial(demographics_sf)
+```
+
+```{r}
+f1 <- as.formula("ice_race ~ pct_red_40 + pop_delta")
+f2 <- as.formula("ice_race ~ pct_red_40 + pop_delta + ice_income + median_inc + poverty_pct + labor_pct +
+                    owner_occ_pct + owner_occ_value + vacant_pct")
+```
+
+
+```{r}
+model_1_ols <- lm(f1, data = demographics_sp@data)
+
+summary(model_1_ols)
+```
+
+```{r}
+model_2_ols <- lm(f2, data = demographics_sp@data)
+
+summary(model_2_ols)
+```
+
+```{r}
+queens <- poly2nb(demographics_sp, queen = TRUE)
+weights <- nb2listw(queens, style="W", zero.policy = TRUE)
+```
+
+```{r}
+lm.morantest(model_2_ols, weights, alternative="two.sided")
+```
+
+```{r}
+lm.LMtests(model_2_ols, weights, test = "all")
+```
+
+```{r}
+model_3_lag <- spatialreg::lagsarlm(f2, data = demographics_sp@data, weights)
+
+summary(model_3_lag, Nagelkerke = TRUE)
+```
+
+
+## Regression Analysis 2
+
+```{r}
+f3 <- as.formula("owner_occ_value ~ ice_race + pct_red_40 + pop_delta")
+f4 <- as.formula("owner_occ_value ~ ice_race + pct_red_40 + pop_delta + ice_income + median_inc + poverty_pct + labor_pct +
+                    owner_occ_pct + vacant_pct")
+```
+
+
+```{r}
+model_4_ols <- lm(f3, data = demographics_sp@data)
+
+summary(model_4_ols)
+```
+
+```{r}
+model_5_ols <- lm(f4, data = demographics_sp@data)
+
+summary(model_5_ols)
+```
+
+```{r}
+lm.morantest(model_5_ols, weights, alternative="two.sided")
+```
+
+```{r}
+lm.LMtests(model_5_ols, weights, test = "all")
+```
+
+```{r}
+model_6_lag <- spatialreg::lagsarlm(f4, data = demographics_sp@data, weights)
+
+summary(model_6_lag, Nagelkerke = TRUE)
+```
+
+## Clean-up
+
+```{r}
+rm(f1, f2, f3, f4)
+```
+
+## Create Tables for Export
+
+
+
+```{r}
+stargazer(model_1_ols, model_2_ols, header=FALSE, type='latex',
+          title = "Contemporary Segregation and Historical Redlining",
+          add.lines = list(
+            c("AIC", round(AIC(model_1_ols), digits = 3), round(AIC(model_2_ols), digits = 3)),
+            c("BIC", round(BIC(model_1_ols), digits = 3), round(BIC(model_2_ols), digits = 3))),
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          covariate.labels = c("% Redlined, 1940", "Population Change", "ICE, Income",
+                               "Median Income", "% Poverty", "% in Labor Force", "% Owner Occupied",
+                               "Owner Occupied Value, $", "% Vacant"),
+          dep.var.caption  = "ICE, Race",
+          dep.var.labels   = "OLS Models",
+          omit.stat = "rsq",
+          single.row = TRUE,
+          digits = 3,
+          out = here::here("results", "tables", "models1.html"))
+```
+
+```{r}
+stargazer(model_4_ols, model_5_ols, header=FALSE, type='latex',
+          title = "Housing Value, Redlining, and Segregation",
+          add.lines = list(
+            c("AIC", round(AIC(model_4_ols), digits = 3), round(AIC(model_5_ols), digits = 3)),
+            c("BIC", round(BIC(model_4_ols), digits = 3), round(BIC(model_5_ols), digits = 3))),
+          covariate.labels = c("ICE, Race", "% Redlined, 1940", "Population Change", "ICE, Income",
+                               "Median Income", "% Poverty", "% in Labor Force", "% Owner Occupied",
+                               "% Vacant"),
+          dep.var.caption  = "Median Value of Owner Occupied Housing, $",
+          dep.var.labels   = "OLS Models",
+          star.cutoffs = c(0.05, 0.01, 0.001),
+          omit.stat = "rsq",
+          single.row = TRUE,
+          digits = 3,
+          out = here::here("results", "tables", "models2.html"))
+```
