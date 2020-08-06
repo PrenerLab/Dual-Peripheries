@@ -339,3 +339,19 @@ p <- ggplot(data = tracts_long, mapping = aes(fill = cat)) +
 ggsave(here::here("results", "figures", "ice_multiples.png"), p, width = 7.5, height = 10.5, units = "in", dpi = 500)
 ```
 
+
+```{r}
+tracts_long <- filter(tracts_long, period %in% c("1950", "2018"))
+
+p <- ggplot(data = tracts_long, mapping = aes(fill = cat)) +
+  geom_sf(size = .2) +
+  geom_sf(data = counties, fill = NA, size = .6, color = "black") +
+  scale_fill_brewer(palette = "RdBu", name = "ICE") +
+  cowplot::theme_map() +
+  facet_wrap(~period, ncol = 2)
+
+ggsave(here::here("results", "figures", "ice_multiples_simple.png"), p, width = 7.5, height = 3, units = "in", dpi = 500)
+```
+
+
+

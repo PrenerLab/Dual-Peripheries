@@ -254,16 +254,40 @@ symbolic_roads_centroids <- slice(symbolic_roads_centroids, 1)
 ## create map
 p <- ggplot(data = redlining_40_map, mapping = aes(fill = map_breaks)) +
   geom_sf(size = .2) +
-  geom_sf(data = counties, fill = NA, size = .6, color = "black") +
-  geom_sf(data = symbolic_roads, fill = NA, size = 1, color = "black") +
-  geom_text_repel(data = symbolic_roads_centroids, mapping = aes(x = x, y = y, label = FULLNAME, fill = NA),
-                  nudge_x = -30000, nudge_y = 20000) +
-  scale_fill_brewer(palette = "Reds", name = "% Redlined") +
-  cowplot::theme_map()
+  geom_sf(data = counties, fill = NA, size = .4, color = "black") +
+  # geom_sf(data = symbolic_roads, fill = NA, size = 1, color = "black") +
+  # geom_text_repel(data = symbolic_roads_centroids, mapping = aes(x = x, y = y, label = FULLNAME, fill = NA),
+  #                nudge_x = -30000, nudge_y = 20000) +
+  scale_fill_brewer(palette = "Reds", name = "% C/D Grades") +
+  cowplot::theme_map()  +
+  theme(
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 7)
+  )
 
 ggsave(here::here("results", "figures", "redlining_40.png"), p, width = 7.5, height = 6, units = "in", dpi = 500)
 ```
 
+
+```{r}
+redlining_40_boundary <- st_read(here::here("data", "STL_BOUNDARY_Redlining", "STL_BOUNDARY_Redlining_1940.geojson")) %>%
+  st_transform(crs = 26915)
+
+## create map
+p2 <- ggplot() +
+  geom_sf(data = redlining_40_boundary, mapping = aes(fill = grade), size = .2) +
+  geom_sf(data = counties, fill = NA, size = .4, color = "black") +
+  scale_fill_manual(name = "HOLC Grades", values = c("#7BA977", "#7DA8BF", "#CFD173", "#DCA1AC")) +
+  cowplot::theme_map() +
+  theme(
+    legend.title = element_text(size = 9),
+    legend.text = element_text(size = 7)
+  )
+
+p_grid <- cowplot::plot_grid(p2, p, align = "v", ncol = 2, label_size = 12)
+
+ggsave(here::here("results", "figures", "redlining_compare.png"), p_grid, width = 7.5, height = 3, units = "in", dpi = 500)
+```
 
 
 ## Combine Into A Single File
